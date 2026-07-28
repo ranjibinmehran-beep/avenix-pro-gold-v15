@@ -80,6 +80,8 @@ class OrderExecutionEngine:
         return False
 
     def open_trade(self, symbol, side, entry_price, sl, tp1, tp2, tp3, reason, is_manual=False):
+        # Reload portfolio to sync changes across processes
+        self.portfolio = self.load_portfolio()
         # 1. Prop-Firm Daily Drawdown Lock check
         if self.config.get("prop_drawdown_breached", False):
             return {"status": "ignored", "reason": "⚠️ [Prop Guard] Daily drawdown protection lock is active!"}
@@ -154,6 +156,7 @@ class OrderExecutionEngine:
             "open_time": get_tehran_time(),
             "reason": "ثبت معامله دستی" if is_manual else reason,
             "current_price": entry_price,
+            "lot_size": round(final_lot_size, 2),
             "pnl": 0.0,
             "pnl_percent": 0.0,
             "is_manual": is_manual
@@ -162,6 +165,20 @@ class OrderExecutionEngine:
         final_lot_size = round(qty / 100000, 2) if not (contest_mode and self.config.get("use_fixed_lot_in_contest", True)) else self.config.get("contest_fixed_lot_size", 2.0)
         if final_lot_size < 0.01:
             final_lot_size = 0.01
+
+        # --- 🏆 FUNDEDNEXT MAX 3.0 LOTS TOTAL EXPOSURE CAP (کنترل سقف ۳.۰ لات کل معاملات) ---
+        current_total_lots = sum(float(t.get("lot_size", 0.0)) for t in self.portfolio["active_trades"])
+        if current_total_lots >= 3.0:
+            return {"status": "ignored", "reason": f"⚠️ [Exposure Guard] Maximum 3.0 total lots reached! (Current open: {current_total_lots} lots). No more trades allowed."}
+        
+        if current_total_lots + final_lot_size > 3.0:
+            allowed_lots = round(3.0 - current_total_lots, 2)
+            if allowed_lots < 0.01:
+                return {"status": "ignored", "reason": f"⚠️ [Exposure Guard] New order would exceed max 3.0 lots cap! (Allowed: {allowed_lots} lots)."}
+            print(f"[Exposure Guard] Dynamically scaling down trade lot size from {final_lot_size} to {allowed_lots} to respect FundedNext 3.0 lots cap!")
+            final_lot_size = allowed_lots
+            qty = final_lot_size * 100000 if ("USD" in symbol or "/" in symbol) else final_lot_size
+            notional_value = qty * entry_price
 
         if self.broker_type == "forex_mt5" and MT5_AVAILABLE:
             order_type = mt5.ORDER_TYPE_BUY if side == "BUY" else mt5.ORDER_TYPE_SELL
@@ -200,6 +217,8 @@ class OrderExecutionEngine:
         return {"status": "success", "trade": new_trade, "mode": mode_label}
 
     def close_trade_manually(self, trade_id, current_price):
+        # Reload portfolio to sync changes across processes
+        self.portfolio = self.load_portfolio()
         still_active = []
         closed_trade = None
         
@@ -254,7 +273,74 @@ class OrderExecutionEngine:
             
         return None
 
+    def close_losing_trades_emergency(self, live_prices):
+        """
+        Instantly closes only losing active trades (PnL < 0) at current market prices in case of emergency.
+        """
+        self.portfolio = self.load_portfolio()
+        closed_trades = []
+        still_active = []
+        
+        for trade in self.portfolio["active_trades"]:
+            symbol = trade["symbol"]
+            close_price = live_prices.get(symbol, trade["entry_price"])
+            
+            side_multiplier = 1 if trade["side"] == "BUY" else -1
+            final_pnl = trade["qty"] * (close_price - trade["entry_price"]) * side_multiplier
+            
+            if final_pnl < 0: # Only close losing trades!
+                if self.broker_type == "forex_mt5" and MT5_AVAILABLE and "mt5_ticket" in trade:
+                    position_id = trade["mt5_ticket"]
+                    action_type = mt5.ORDER_TYPE_SELL if trade["side"] == "BUY" else mt5.ORDER_TYPE_BUY
+                    close_price_mt5 = mt5.symbol_info_tick(symbol).bid if trade["side"] == "BUY" else mt5.symbol_info_tick(symbol).ask
+                    
+                    lot_to_close = trade.get("qty", 100000.0) / 100000.0
+                    if self.config.get("contest_mode", False) and self.config.get("use_fixed_lot_in_contest", True):
+                        lot_to_close = self.config.get("contest_fixed_lot_size", 2.0)
+                        
+                    request = {
+                        "action": mt5.TRADE_ACTION_DEAL,
+                        "symbol": symbol,
+                        "volume": round(lot_to_close, 2),
+                        "type": action_type,
+                        "position": position_id,
+                        "price": close_price_mt5,
+                        "deviation": 20,
+                        "magic": 0, # Manual signature
+                        "type_time": mt5.ORDER_TIME_GTC,
+                        "type_filling": mt5.ORDER_FILL_IOC,
+                    }
+                    mt5.order_send(request)
+
+                trade["close_price"] = round(close_price, 4)
+                trade["close_time"] = get_tehran_time()
+                trade["status"] = "CLOSED"
+                trade["close_reason"] = "EMERGENCY PANIC CLOSE LOSING"
+                trade["pnl"] = round(final_pnl, 2)
+                trade["pnl_percent"] = round((final_pnl / trade["entry_price"]) * 100, 2)
+                
+                self.portfolio["balance"] = round(self.portfolio["balance"] + trade["pnl"], 2)
+                self.portfolio["completed_trades"].append(trade)
+                closed_trades.append(trade)
+            else:
+                still_active.append(trade)
+                
+        self.portfolio["active_trades"] = still_active
+        self.save_portfolio()
+        return closed_trades
+
     def update_active_trades(self, live_prices):
+        # Reload portfolio to sync changes across processes
+        self.portfolio = self.load_portfolio()
+        
+        # Dynamically fetch real-time balance from MT5 if connected
+        if self.broker_type == "forex_mt5" and MT5_AVAILABLE:
+            if mt5.initialize():
+                account_info = mt5.account_info()
+                if account_info:
+                    self.portfolio["balance"] = round(account_info.balance, 2)
+                    if "initial_starting_balance" not in self.portfolio or self.portfolio["initial_starting_balance"] == 10000.0:
+                        self.portfolio["initial_starting_balance"] = round(account_info.balance, 2)
         closed_trades = []
         still_active = []
         portfolio_updated = False

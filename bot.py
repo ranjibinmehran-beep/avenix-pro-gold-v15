@@ -11,16 +11,31 @@ from strategy import TradingBrain
 from execution import OrderExecutionEngine
 from signal_room import SignalRoom
 
-def is_forex_market_closed():
-    # Returns True if current UTC time is between Friday 22:00 UTC and Sunday 22:00 UTC
+def is_forex_market_restricted():
+    # Returns True if market is closed, or if restricted (2 hours before close, 2 hours after open)
     now = datetime.datetime.now(datetime.timezone.utc)
     weekday = now.weekday() # 0 is Monday, ..., 4 is Friday, 5 is Saturday, 6 is Sunday
-    if weekday == 5: # Saturday
+    
+    # Saturday: Completely Closed (Restricted)
+    if weekday == 5: 
         return True
-    elif weekday == 4: # Friday
-        return now.hour >= 22
-    elif weekday == 6: # Sunday
-        return now.hour < 22
+    
+    # Friday close: Market closes at 22:00 UTC. 
+    # We restrict 2 hours before, so starting at 20:00 UTC (Friday hour >= 20)
+    elif weekday == 4:
+        return now.hour >= 20
+        
+    # Sunday open: Market opens at 22:00 UTC. 
+    # Sunday before 22:00 UTC is Closed.
+    # Sunday between 22:00 UTC and 24:00 UTC is the first 2 hours after open, so we restrict it!
+    # Therefore, Sunday is restricted the entire day!
+    elif weekday == 6:
+        return True
+        
+    # Monday: Restrict the first 2 hours of Monday (00:00 UTC to 02:00 UTC)
+    elif weekday == 0:
+        return now.hour < 2
+        
     return False
 
 def is_crypto_symbol(symbol):
@@ -130,6 +145,12 @@ class RealTimeTradingBot:
 
     def run_one_cycle(self):
         self.config = self.load_config()
+        
+        # --- 🛡️ MASTER TRADING SWITCH CHECK (چک کردن کلید متوقف کردن موقت اسکن و معاملات) ---
+        if not self.config.get("trading_enabled", True):
+            print("[Avenix Master Switch] Automated scanning and trading are currently PAUSED by the master switch.")
+            return
+
         symbols = self.config.get("symbols", ["XAU/USD", "XAG/USD", "EUR/USD", "GBP/USD", "USD/JPY", "BRENT/USD", "SOL/USDT"])
         timeframes = self.config.get("timeframes", ["1m", "5m", "15m", "1h", "4h", "1d"])
         trading_tf = self.config.get("trading_timeframe", "15m")
@@ -156,8 +177,13 @@ class RealTimeTradingBot:
                 continue
             
             # Weekend filter: if market is closed for this symbol, skip strategy analysis and trade execution!
-            if is_forex_market_closed() and not is_crypto_symbol(symbol):
-                print(f"[Avenix Weekend Focus] {symbol} market is closed. Skipping technical signal scanner and trade generation.")
+            if is_forex_market_restricted() and not is_crypto_symbol(symbol):
+                print(f"[Avenix Weekend Focus] {symbol} market is closed/restricted. Skipping technical signal scanner and trade generation.")
+                continue
+
+            # --- 📰 HIGH-IMPACT NEWS FILTER GUARD (سپر محافظتی فیلتر اخبار) ---
+            if self.config.get("news_filter_active", False) and not is_crypto_symbol(symbol):
+                print(f"[Avenix News Guard] News Filter is currently ACTIVE. Skipping {symbol} automated trade execution to prevent news whipsaws.")
                 continue
             
             # 2. RUN BRAIN STRATEGY
@@ -181,6 +207,13 @@ class RealTimeTradingBot:
                     brain_score=analysis.get('brain_score', 80),
                     confirmations=analysis.get('confirmations', None)
                 )
+                
+                # --- 🏆 PROP FIRM EXPOSURE GUARD: Block Crypto Execution on MT5 but Keep Signal ---
+                is_crypto = is_crypto_symbol(symbol)
+                is_prop_mode = self.config.get("contest_mode", False)
+                if is_prop_mode and is_crypto:
+                    print(f"[Prop Guard] {symbol} is a Crypto symbol. Skipping automated execution on MT5 to save high commissions/swaps, but signal has been successfully broadcast to Telegram!")
+                    continue
                 
                 exec_result = self.executor.open_trade(
                     symbol=symbol,
@@ -222,13 +255,13 @@ class RealTimeTradingBot:
         while True:
             try:
                 self.run_one_cycle()
-                time.sleep(10)
+                time.sleep(2)
             except KeyboardInterrupt:
                 print("停止 - Shutting down gracefully...")
                 break
             except Exception as e:
                 print(f"[Error in Bot Loop]: {e}")
-                time.sleep(5)
+                time.sleep(2)
 
 if __name__ == "__main__":
     bot = RealTimeTradingBot()

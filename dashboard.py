@@ -243,6 +243,7 @@ TXT = {
         "tab_contest": "🏆 اتاق فانددنکست (FundedNext Portal)",
         "tab_settings": "⚙️ تنظیمات فوق‌پیشرفته سیستم",
         "tab_ranking": "🏆 رنکینگ و آمار پیشرفته",
+        "tab_risk": "💰 اتاق مدیریت سرمایه",
         "selector_symbol": "انتخاب نماد معاملاتی جهت تحلیل زنده",
         "selector_tf": "تایم فریم چارت",
         "tv_caption": "🌐 <b>اتاق چارت تریدینگ‌ویو:</b> این نمودار کاملاً ریسپانسیو و تمام‌صفحه است. شما می‌توانید در گذشته بازار اسکرول کنید، ابزارهای ترسیمی اضافه کنید و اندیکاتورها را شخصی‌سازی کنید.",
@@ -346,6 +347,7 @@ TXT = {
         "tab_contest": "🏆 FundedNext Portal",
         "tab_settings": "⚙️ System Config",
         "tab_ranking": "🏆 Ranking & Stats",
+        "tab_risk": "💰 Risk Manager",
         "selector_symbol": "Select Asset for Live Analysis",
         "selector_tf": "Chart Timeframe",
         "tv_caption": "🌐 <b>TradingView Terminal:</b> This chart is fully interactive. You can scroll back, add drawing tools, and customize indicators natively.",
@@ -441,7 +443,7 @@ TXT = {
     }
 }
 
-t = TXT[lang_code]
+t = TXT.get(lang_code, TXT["fa"])
 
 with lang_col1:
     st.markdown(f"<h1 style='color: #3b82f6; font-size: 24px; font-weight: 700; margin-top: 5px;'>{t['title']}</h1>", unsafe_allow_html=True)
@@ -469,6 +471,18 @@ if not st.session_state.terms_accepted:
         st.rerun()
 
 else:
+    # --- 🛡️ MASTER AUTOMATED TRADING SWITCH ---
+    is_trading_enabled = config.get("trading_enabled", True)
+    col_master_sw, _ = st.columns([2, 1])
+    with col_master_sw:
+        new_trading_enabled = st.toggle("🟢 موتور معامله‌گری و اسکنر بازار فعال است (Master Trading Switch)", value=is_trading_enabled)
+        if new_trading_enabled != is_trading_enabled:
+            config["trading_enabled"] = new_trading_enabled
+            save_config(config)
+            st.success("وضعیت ترید خودکار با موفقیت تغییر یافت!")
+            time.sleep(1)
+            st.rerun()
+
     # ----------------- 🟢 LIVE FLOATING PNL HUD BANNER -----------------
     active_trades = portfolio.get("active_trades", [])
     total_floating_pnl = 0.0
@@ -527,9 +541,9 @@ else:
         weekend_display = weekend_msg_fa if lang_code == "fa" else weekend_msg_en
         st.markdown(weekend_display, unsafe_allow_html=True)
 
-    # ----------------- ACTIVE MAIN TABS (7-Tab Layout: Completely Separated!) -----------------
-    tab_chart_view, tab_brain_view, tab_signals_view, tab_broker_view, tab_contest_view, tab_settings_view, tab_ranking_view = st.tabs([
-        t["tab_chart"], t["tab_brain"], t["tab_signals"], t["tab_broker"], t["tab_contest"], t["tab_settings"], t["tab_ranking"]
+    # ----------------- ACTIVE MAIN TABS (8-Tab Layout: Completely Separated!) -----------------
+    tab_chart_view, tab_brain_view, tab_signals_view, tab_broker_view, tab_contest_view, tab_settings_view, tab_ranking_view, tab_risk_view = st.tabs([
+        t["tab_chart"], t["tab_brain"], t["tab_signals"], t["tab_broker"], t["tab_contest"], t["tab_settings"], t["tab_ranking"], t["tab_risk"]
     ])
 
     # ----------------- TAB 1: TRADINGVIEW LIVE CHART & INSTANT TRADING PANEL -----------------
@@ -613,6 +627,26 @@ else:
                             st.rerun()
                         else:
                             st.error(res.get("reason"))
+
+        # --- 🚨 EMERGENCY PANIC CLOSE LOSING BUTTON ---
+        st.markdown("<br/>", unsafe_allow_html=True)
+        if st.button("🚨 بستن اضطراری معاملات در ضرر (Panic Button - Close Losing Trades Only)", use_container_width=True, type="primary"):
+            with st.spinner("Closing losing positions..."):
+                dummy_live_prices = {
+                    "XAU/USD": 2420.0, "XAG/USD": 29.0, "EUR/USD": 1.0850, "GBP/USD": 1.1250, "USD/JPY": 154.50, "BRENT/USD": 82.50,
+                    "SOL/USDT": 142.50, "BTC/USDT": 65000.0, "ETH/USDT": 3400.0, "BNB/USDT": 580.0, "XRP/USDT": 0.58, "ADA/USDT": 0.38,
+                    "DOGE/USDT": 0.12, "TON/USDT": 7.20
+                }
+                dummy_live_prices[selected_symbol] = current_market_price
+                closed_list = executor.close_losing_trades_emergency(dummy_live_prices)
+                if closed_list:
+                    for closed_tr in closed_list:
+                        notify_manual_close(closed_tr)
+                    st.success(f"Successfully closed {len(closed_list)} losing positions on MT5/Broker!")
+                    time.sleep(1)
+                    st.rerun()
+                else:
+                    st.info("هیچ معامله‌ی در ضرری برای بستن وجود ندارد. معاملات سودده شما باز نگه داشته شدند!")
 
         # --- 🔔 ACTIVE ORDER LINES INFORMATION BANNER ---
         active_trades = portfolio.get("active_trades", [])
@@ -891,9 +925,25 @@ else:
             config["exchange_api_key"] = c_api
             config["exchange_secret_key"] = c_sec
             save_config(config)
-            st.success("Broker Connection credentials saved & synced successfully on MT5/Exchange!")
-            time.sleep(1)
-            st.rerun()
+            
+            # Real-time Connection Test for MetaTrader 5
+            if selected_b == "forex_mt5":
+                with st.spinner("⏳ در حال تست اتصال زنده به متاتریدر ۵ حساب شما..."):
+                    test_executor = OrderExecutionEngine()
+                    connected = test_executor.initialize_mt5()
+                    if connected:
+                        st.success("🟢 اتصال موفقیت‌آمیز بود! حساب واقعی متاتریدر ۵ شما با موفقیت به کارگزاری (آلپاری/لایت‌فایننس) متصل شد.")
+                        portfolio["balance"] = test_executor.portfolio["balance"]
+                        portfolio["initial_starting_balance"] = test_executor.portfolio["initial_starting_balance"]
+                        save_portfolio(portfolio)
+                        time.sleep(2.5)
+                        st.rerun()
+                    else:
+                        st.error("🔴 خطا در اتصال به متاتریدر ۵! لطفا شماره حساب، رمز عبور یا نام سرور کارگزاری را چک کنید. همچنین دقت کنید که متاتریدر ۵ باید روی سیستم ویندوزی شما در حال اجرا باشد!")
+            else:
+                st.success("🟢 تنظیمات صرافی کریپتو با موفقیت ذخیره شد!")
+                time.sleep(1)
+                st.rerun()
             
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -903,7 +953,6 @@ else:
         current_balance = portfolio.get("balance", 10000.0)
         new_balance = st.number_input(
             "موجودی واقعی حساب بروکر خود را وارد کنید ($)",
-            min_value=0.0,
             value=float(current_balance),
             step=10.0,
             key="broker_balance_manual"
@@ -1436,3 +1485,70 @@ else:
             st.markdown("<h4 style='color: #94a3b8;'>هنوز هیچ معامله‌ی بسته‌شده‌ای در دفترچه معاملاتی شما ثبت نشده است!</h4>", unsafe_allow_html=True)
             st.markdown("<p style='color: #64748b; font-size: 13px;'>به محض بسته‌شدن اولین معامله توسط ربات یا به صورت دستی، تحلیل آماری و نرخ برد زنده شما در این بخش لود خواهد شد.</p>", unsafe_allow_html=True)
             st.markdown("</div>", unsafe_allow_html=True)
+
+    # ----------------- 💰 TAB 8: DEDICATED RISK & CAPITAL MANAGER (اتاق مدیریت سرمایه حرفه‌ای) -----------------
+    with tab_risk_view:
+        st.markdown("### 💰 اتاق محاسبات، مدیریت ریسک و سرمایه فوق‌پیشرفته (Avenix Professional Risk & Capital Suite)")
+        st.markdown("<p style='color: #94a3b8; font-size: 13px;'>کنترل، مدیریت حجم و لوت‌سایز، شبیه‌ساز معاملات میکرو، سپر کنترل اخبار و محدودیت‌های فیزیکی بروکر</p>", unsafe_allow_html=True)
+        
+        # 1. Micro Account Auto-Lot Sizing Simulator
+        st.markdown("#### 📊 ۱. فرمول محاسبه لوت‌سایز خودکار و حالت حساب خُرد (موجودی‌های زیر ۳۰ دلار)")
+        st.markdown("<div class='ios-card'>", unsafe_allow_html=True)
+        current_balance = float(portfolio.get("balance", 10000.0))
+        risk_percentage = float(config.get("risk_percentage", 1.0))
+        risk_cash = current_balance * (risk_percentage / 100.0)
+        
+        st.write(f"💵 **موجودی زنده بروکر شما:** ")
+        st.write(f"🛡️ **میزان ریسک شما بر اساس تنظیمات ({risk_percentage}%):**  در هر معامله")
+        
+        if current_balance < 30.0:
+            st.success("🟢 **وضعیت حساب:** حالت حساب خُرد (Micro Account Mode) به طور خودکار فعال است! ربات تمام تریدها را با لوت‌سایز **۰.۰۱** باز می‌کند تا تراکنش‌های شما بدون ریجکت توسط بروکر انجام شود.")
+        else:
+            st.info("🟢 **وضعیت حساب:** حالت استاندارد فعال است. لوت‌سایز پوزیشن‌ها به صورت متغیر و پویا بر اساس فاصله‌ی نقطه ورود تا استاپ‌لاس و درصد ریسک فوق محاسبه می‌شود.")
+            
+        st.markdown("""
+        <p style='color: #94a3b8; font-size: 12px; margin-top: 10px;'>
+        💡 <b>نحوه کارکرد سیستم میکرو:</b> بسیاری از ربات‌ها با مبالغ کم مانند ۱۰، ۱۵ یا ۳۰ دلار ارور تقسیم بر صفر می‌دهند و از کار می‌افتند. آونیکس V8.5 مجهز به پروتکل حداقل لوت‌سایز بروکر است و تحت هر شرایطی برای حساب‌های خرد مقدار حداقل 0.01 لوت را فیکس می‌کند تا تریدهای شما انجام شوند.
+        </p>
+        """, unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+        
+        # 2. News Filter Guard (سپر فیلتر اخبار)
+        st.markdown("#### 📰 ۲. سپر ضد نوسان اخبار اقتصادی سنگین (High-Impact News Guard)")
+        st.markdown("<div class='ios-card'>", unsafe_allow_html=True)
+        is_news_filter = config.get("news_filter_active", False)
+        new_news_filter = st.toggle("🚨 فعال‌سازی سپر فیلتر اخبار (مسدود کردن معاملات در زمان اخبار قرمز)", value=is_news_filter)
+        if new_news_filter != is_news_filter:
+            config["news_filter_active"] = new_news_filter
+            save_config(config)
+            st.success("تنظیمات فیلتر اخبار با موفقیت ذخیره شد!")
+            time.sleep(1)
+            st.rerun()
+            
+        st.markdown("""
+        <p style='color: #94a3b8; font-size: 12px; margin-top: 10px;'>
+        ⚠️ <b>عملکرد سپر اخبار:</b> با فعال‌سازی این گزینه، تریدر می‌تواند از باز شدن پوزیشن جدید توسط ربات در زمان نوسانات شدید خبری (مانند NFP، نرخ بهره فدرال رزرو و تورم CPI) جلوگیری کند. ربات اسکن بازار را در این زمان تعلیق می‌کند.
+        </p>
+        """, unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+        
+        # 3. Forex Market Opening/Closing Protections
+        st.markdown("#### ⏰ ۳. زمان‌بندی ایمن افتتاحیه و اختتامیه بازار فارکس (Session Transition Protector)")
+        st.markdown("<div class='ios-card'>", unsafe_allow_html=True)
+        st.markdown("""
+        برای جلوگیری از افت حساب در زمان اسپرد‌های سنگین و نوسانات نامتعارف، قوانین زیر روی ربات شما ست شده است:
+        * 🛑 **۲ ساعت مانده به بسته شدن جمعه شب بازار فارکس:** ربات اسکنر فارکس را به طور کامل متوقف می‌کند (جمعه بعد از ساعت ۲۰:۰۰ به وقت UTC).
+        * 🛑 **۲ ساعت اول باز شدن دوشنبه بازار فارکس:** ربات اسکنر فارکس را تا اتمام نوسانات ابتدایی تعلیق می‌کند (دوشنبه قبل از ساعت ۰۲:۰۰ به وقت UTC).
+        * 🟢 **بازار ۲۴ ساعته کریپتو (BTC, ETH, SOL):** در تمام روزهای تعطیلی فارکس (شنبه و یکشنبه)، اسکنر کریپتو بدون وقفه بیدار است و سیگنال‌دهی ۲۴/۷ فعال است!
+        """, unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+        
+        # 4. Prop Firm Crypto Execution Protector
+        st.markdown("#### 🛡️ ۴. سپر محافظتی هزینه‌ها و کمیسیون‌های پراپ‌فرم (Prop Crypto Block)")
+        st.markdown("<div class='ios-card'>", unsafe_allow_html=True)
+        st.markdown("""
+        یکی از بزرگ‌ترین دلایل سوختن حساب‌های پراپ، کمیسیون‌ها و اسپرد‌های فوق‌سنگین رمزارزها در سرور‌های متاتریدر ۵ پراپ‌فرم‌هاست. آونیکس V8.5 یک فیلتر کاملاً خودکار دارد:
+        * 🛑 **در حساب مسابقات/پراپ (Contest Mode فعال):** ربات به هیچ عنوان معاملات کریپتو را روی متاتریدر ۵ حساب شما باز نمی‌کند تا از زیان‌ها و کمیسیون‌های نجومی جلوگیری کند.
+        * 📢 **سیگنال‌دهی زنده فعال است:** ربات سیگنال‌های پویای طلا و فارکس را ترید می‌کند، اما سیگنال‌های کریپتو را فقط تحلیل کرده و جهت استفاده شخصی به کانال تلگرام و بله شما می‌فرستد!
+        """, unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)

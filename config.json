@@ -39,6 +39,7 @@
     "1d"
   ],
   "trading_timeframe": "15m",
+  "trading_enabled": true,
   "risk_percentage": 1.0,
   "default_leverage": 1,
   "rsi_period": 14,
